@@ -34,4 +34,7 @@ public final class EnergyCommand {
     public static void setBookingCharge(Object plan){parameters("charging.booking",new String[]{"request"},plan);}
     public static void setTravelPlan(Object plan){parameters("travel.plan",new String[]{"request"},plan);}
     public static void setTravelPlanPlus(Object plan){parameters("travel.plan_plus",new String[]{"request"},plan);}
+    public static void suspension(int level){parameters("suspension.level",new String[]{"level"},level);}
+    public static void fridgeSchedule(Object plan){parameters("fridge.schedule",new String[]{"request"},plan);}
+    public static void fridgeControl(Object settings){parameters("fridge.control",new String[]{"request"},settings);}
 }
