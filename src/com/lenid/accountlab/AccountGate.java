@@ -1,11 +1,15 @@
 package com.lenid.accountlab;
 import android.app.*;import android.content.*;import android.view.*;import android.widget.*;import org.json.*;
 public final class AccountGate {
- static Context context;static boolean launchedVehicle=false,checkedOrigin=false;
+ static Context context;static boolean checkedOrigin=false;
+ private static java.lang.ref.WeakReference<Activity> admittedMain = new java.lang.ref.WeakReference<>(null);
+ private static volatile boolean activeBinding, enterVehicle;
+ private static Activity checkingMain;
+ private static final java.util.concurrent.ExecutorService entryWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
  public static void init(Context c){context=c.getApplicationContext();if(!checkedOrigin){try{new LabHttp(context);checkedOrigin=true;}catch(Exception ignored){}}}
  static android.content.SharedPreferences prefs(){return context.getSharedPreferences("phone",0);}
- public static void save(Context c,JSONObject me)throws Exception{init(c);prefs().edit().putString("verified_profile",me.getJSONObject("profile").toString()).apply();}
- public static void clear(Context c){init(c);prefs().edit().remove("verified_profile").remove("access").remove("refresh").apply();}
+ public static void save(Context c,JSONObject me)throws Exception{init(c);activeBinding=hasActiveVehicle(me);prefs().edit().putString("bound_owner",activeBinding?me.getString("user_id"):"").putString("verified_profile",me.getJSONObject("profile").toString()).apply();}
+ public static void clear(Context c){init(c);activeBinding=false;enterVehicle=false;prefs().edit().remove("bound_owner").remove("pending_pair_owner").remove("pending_pair_id").remove("pending_pair_phrase").remove("verified_profile").remove("access").remove("refresh").apply();}
  static void ensureContext(){if(context!=null)return;try{Object companion=Class.forName("com.zeekrlife.base.BaseApp").getField("Companion").get(null);init((Context)companion.getClass().getMethod("getApplication").invoke(companion));}catch(Exception ignored){}}
  public static boolean logged(){ensureContext();return context!=null&&!prefs().getString("access","").isEmpty()&&!prefs().getString("verified_profile","").isEmpty();}
  public static Object userInfo(){try{Class<?> cls=Class.forName("com.zeekrlife.data.entity.UserInfoEntity");Object obj=cls.getConstructor().newInstance();if(!logged())return obj;JSONObject p=new JSONObject(prefs().getString("verified_profile","{}"));for(String[] pair:new String[][]{{"accountId",p.getString("user_id")},{"accountInfoId",p.getString("user_id")},{"nickname",p.getString("display_name")},{"username",p.getString("display_name")}}){java.lang.reflect.Field f=cls.getDeclaredField(pair[0]);f.setAccessible(true);f.set(obj,pair[1]);}return obj;}catch(Exception e){return null;}}
@@ -20,5 +24,71 @@ public final class AccountGate {
  static void vehicleHeader(Activity a){View title=named(a,"cl_title");if(title==null||!title.isShown())return;contrast(title);contrast(named(a,"im_msg"));contrast(named(a,"im_menu"));contrast(named(a,"ll_mileage"));contrast(named(a,"ll_update"));View decor=a.getWindow().getDecorView();if(android.os.Build.VERSION.SDK_INT>=30&&a.getWindow().getInsetsController()!=null)a.getWindow().getInsetsController().setSystemBarsAppearance(8,8);int flags=decor.getSystemUiVisibility();if((flags&View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR)==0)decor.setSystemUiVisibility(flags|View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);}
  static void accountRow(Activity a){vehicleHeader(a);profileIdentity(a);menuRow(a,"recommend_btn","Мой аккаунт","profile");menuRow(a,"tv_koc","Мои автомобили","vehicles");}
 
- public static void attach(Activity a){init(a);if(!logged()){a.startActivity(new Intent(a,PhoneActivity.class));return;}ReleaseUpdate.check(a);hideTabs(a);ViewGroup root=a.findViewById(android.R.id.content);if(root==null)return;if(!launchedVehicle){launchedVehicle=true;root.postDelayed(()->{View car=named(a,"tab_vehicle");if(car!=null)car.performClick();},300);}View old=root.findViewWithTag("local-account");if(old!=null&&old.getParent() instanceof ViewGroup)((ViewGroup)old.getParent()).removeView(old);accountRow(a);if(!listeners.containsKey(a)){listeners.put(a,true);root.getViewTreeObserver().addOnGlobalLayoutListener(()->accountRow(a));}}
+ static boolean hasActiveVehicle(JSONObject account) throws JSONException {
+     JSONArray vehicles = account.getJSONArray("vehicles");
+     for (int i = 0; i < vehicles.length(); i++) {
+         if ("active".equals(vehicles.getJSONObject(i).getString("state"))) return true;
+     }
+     return false;
+ }
+ static void openVehicle(Activity screen) {
+     enterVehicle = true;
+     screen.startActivity(new Intent().setClassName(screen, "com.zeekrlife.main.MainActivity")
+         .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+     screen.finish();
+ }
+ public static void attach(Activity a){
+     init(a);
+     if (!logged()) {
+         a.startActivity(new Intent(a,PhoneActivity.class));
+         return;
+     }
+     if (!enterVehicle && admittedMain.get()!=a && knownBoundOwner()) {
+         verifyReturningOwner(a);
+         return;
+     }
+     if (!activeBinding || (admittedMain.get()!=a && !enterVehicle)) {
+         a.startActivity(new Intent(a,PhoneActivity.class));
+         return;
+     }
+     boolean selectVehicle = enterVehicle;
+     enterVehicle = false;
+     admittedMain = new java.lang.ref.WeakReference<>(a);
+     showStockMain(a,selectVehicle);
+ }
+ private static boolean knownBoundOwner(){
+     try{
+         String owner=new JSONObject(prefs().getString("verified_profile","{}")).getString("user_id");
+         return owner.equals(prefs().getString("bound_owner",""));
+     }catch(JSONException e){return false;}
+ }
+ private static void verifyReturningOwner(Activity a){
+     if(checkingMain==a)return;
+     checkingMain=a;
+     String owner=prefs().getString("bound_owner","");
+     entryWorker.execute(()->{
+         JSONObject account=null;
+         try{
+             account=ControlBridge.api(a.getApplicationContext(),"GET","/v1/me",null);
+         }catch(Exception ignored){ /* The entry screen retries through its existing session flow. */ }
+         final JSONObject result=account;
+         a.runOnUiThread(()->{
+             if(checkingMain!=a)return;
+             checkingMain=null;
+             if(a.isFinishing() || a.isDestroyed() || !owner.equals(prefs().getString("bound_owner","")))return;
+             boolean admitted=false;
+             if(result!=null && owner.equals(result.optString("user_id"))){
+                 try{save(a,result);admitted=activeBinding;}catch(Exception ignored){}
+             }
+             if(admitted){
+                 admittedMain=new java.lang.ref.WeakReference<>(a);
+                 showStockMain(a,true);
+             }else if(!a.isChangingConfigurations()){
+                 a.startActivity(new Intent(a,PhoneActivity.class));
+             }
+         });
+     });
+ }
+ private static void showStockMain(Activity a,boolean selectVehicle){
+     ReleaseUpdate.check(a);hideTabs(a);ViewGroup root=a.findViewById(android.R.id.content);if(root==null)return;if(selectVehicle){root.postDelayed(()->{View car=named(a,"tab_vehicle");if(car!=null)car.performClick();},300);}View old=root.findViewWithTag("local-account");if(old!=null&&old.getParent() instanceof ViewGroup)((ViewGroup)old.getParent()).removeView(old);accountRow(a);if(!listeners.containsKey(a)){listeners.put(a,true);root.getViewTreeObserver().addOnGlobalLayoutListener(()->accountRow(a));}}
 }
